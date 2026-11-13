@@ -1,0 +1,2 @@
+// A COMM race and a solution race together: try several --seed values.
+for(@(p || q) <- x){ l!(*p) | r!(*q) } | for(a <- x){ lost!(*a) } | x!(true)

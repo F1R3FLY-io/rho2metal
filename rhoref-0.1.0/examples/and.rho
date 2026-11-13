@@ -1,0 +1,2 @@
+// An AND gate (spec, Appendix A).
+for(a <- x){ for(b <- y){ z!(*a && *b) } } | x!(true) | y!(false)

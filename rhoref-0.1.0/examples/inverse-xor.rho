@@ -1,0 +1,2 @@
+// A gate run backwards: two solutions, chosen by the arbiter (spec, Appendix A).
+for(@(p xor q) <- x){ l!(*p) | r!(*q) } | x!(true)

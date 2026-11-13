@@ -1,0 +1,6 @@
+// Replication by the reflective encoding, with no machine support:
+//   D(n) = for(v <- n){ n!(*v) | *v }      !P = n!( D(n) | P ) | D(n)
+// Here P is an inverter on x.  The encoding unfolds for ever, so the run ends
+// on the receive-table bound.  Run with:  --egress out --steps 200
+n!( for(v <- n){ n!(*v) | *v } | for(a <- x){ out!(~*a) } ) | for(v <- n){ n!(*v) | *v }
+| x!(true) | x!(false)

@@ -1,0 +1,2 @@
+// The same inverter with the persistent receive.  Run with:  --egress out
+for(a <= x){ out!(~*a) } | x!(true) | x!(false)

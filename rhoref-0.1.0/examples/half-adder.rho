@@ -1,0 +1,2 @@
+// Half adder.  Run with:  rhoref run examples/half-adder.rho --egress s,c
+for(a <- x){ for(b <- y){ s!(*a xor *b) | c!(*a && *b) } } | x!(true) | y!(true)
