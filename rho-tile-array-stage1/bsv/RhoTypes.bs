@@ -1,0 +1,363 @@
+package RhoTypes where
+
+-- Words, images and the pure functions of a tile: operand evaluation,
+-- pattern matching with the mask solver, the affine solver, guards,
+-- the arbiter's choice functions and the entropy registers.
+-- Stage 1 of the design specification, draft 0.6.
+
+import Vector
+import Config
+
+-- ---------------------------------------------------------------------
+-- Words. A word is a 3-bit tag and a 29-bit payload. In stage 1 every
+-- name is an immediate, so one word format serves names and the quoted
+-- payloads of sends alike.
+
+type Word = Bit 32
+type IntV = Bit 29
+type Env  = Vector 6 Word
+type Tmps = Vector 8 Word
+
+tZERO :: Bit 3
+tZERO = 0
+tBOOL :: Bit 3
+tBOOL = 1
+tINT :: Bit 3
+tINT = 2
+tSYM :: Bit 3
+tSYM = 3
+
+tagOf :: Word -> Bit 3
+tagOf w = w[31:29]
+
+intOf :: Word -> IntV
+intOf w = w[28:0]
+
+mkBool :: Bit 1 -> Word
+mkBool b = tBOOL ++ (zeroExtend b)
+
+mkInt :: IntV -> Word
+mkInt i = tINT ++ i
+
+-- ---------------------------------------------------------------------
+-- Image formats. Each struct is one ROM word; the first field is in the
+-- most significant bits. The compiler (tools/rhoc.py) packs the same way.
+
+struct Opnd =
+    okind :: Bit 2      -- 0 variable, 1 constant, 2 temporary
+    ow    :: Word
+  deriving (Bits)
+
+struct CNode =
+    ckind :: Bit 3      -- 0 nil, 1 par, 2 send, 3 receive, 4 residue
+    cchan :: Opnd
+    cx    :: Bit 8
+    cy    :: Bit 8
+  deriving (Bits)
+
+struct XNode =
+    xkind  :: Bit 2     -- 0 operand, 1 Boolean function, 2 arithmetic step
+    xlast  :: Bit 1
+    xop    :: Bit 3     -- 0 add, 1 subtract, 2 multiply, 3 negate
+    xk     :: Bit 3
+    xsup   :: Bit 18
+    xa     :: Opnd
+    xb     :: Opnd
+    xtable :: Bit 64
+  deriving (Bits)
+
+struct RInfo =
+    rpersist :: Bit 1
+    rbody    :: Bit 8
+    rpkind   :: Bit 2   -- 0 NBIND, 1 QZERO, 2 BLEAF, 3 ALEAF
+    rnmask   :: Bit 3
+    rbtable  :: Bit 64
+    rc0      :: IntV
+    rc1      :: IntV
+    rc2      :: IntV
+    rk       :: Bit 2
+    rt       :: Bit 5
+    rpivot   :: Bit 1
+    roinv    :: IntV
+    rhasg    :: Bit 1
+    rnatoms  :: Bit 2
+    rop0     :: Bit 2   -- 0 less-than, 1 equal, 2 Boolean variable
+    ra0      :: Opnd
+    rb0      :: Opnd
+    rop1     :: Bit 2
+    ra1      :: Opnd
+    rb1      :: Opnd
+    rgtable  :: Bit 64
+  deriving (Bits)
+
+-- ---------------------------------------------------------------------
+-- Machine state records.
+
+struct SEntry =
+    schan :: Word
+    spay  :: Word
+  deriving (Bits)
+
+struct REntry =
+    rchan :: Word
+    rinfo :: Bit 6
+    renv  :: Env
+  deriving (Bits)
+
+struct Job =
+    jaddr :: Bit 8
+    jenv  :: Env
+  deriving (Bits)
+
+struct Packet =
+    pdx    :: Bit 4
+    pdy    :: Bit 4
+    pkind  :: Bit 1     -- 0 send, 1 receive
+    pchan  :: Word
+    ppay   :: Word
+    prinfo :: Bit 6
+    penv   :: Env
+  deriving (Bits)
+
+-- ---------------------------------------------------------------------
+-- Elaboration-time loop.
+
+forI :: Integer -> Integer -> a -> (a -> Integer -> a) -> a
+forI i n acc f = if i >= n then acc else forI (i + 1) n (f acc i) f
+
+-- ---------------------------------------------------------------------
+-- Arbiter (Section 6.9). choose w n returns floor(w n / 2^32).
+
+choose :: Bit 32 -> Bit 7 -> Bit 7
+choose w n =
+    let p :: Bit 39
+        p = (zeroExtend w) * (zeroExtend n)
+    in truncate (p >> 32)
+
+popCount :: Bit 64 -> Bit 7
+popCount m = forI 0 64 0 (\ c i -> c + zeroExtend ((m >> (fromInteger i))[0:0]))
+
+-- index of the u-th set bit of m
+nthSet :: Bit 64 -> Bit 7 -> Bit 6
+nthSet m u =
+    let step :: (Bit 7, Bit 6) -> Integer -> (Bit 7, Bit 6)
+        step (c, r) i =
+            let b = (m >> (fromInteger i))[0:0] == 1
+            in if b then (c + 1, if c == u then fromInteger i else r) else (c, r)
+        (_, res) = forI 0 64 (0, 0) step
+    in res
+
+firstFree :: Bit 8 -> Bit 3
+firstFree v = truncate (nthSet (zeroExtend (invert v)) 0)
+
+-- Galois registers. Each advances its full width per clock, so that
+-- successive cycles use disjoint bits.
+
+lfsr32Step :: Bit 32 -> Bit 32
+lfsr32Step w = if w[0:0] == 1 then (w >> 1) ^ 0x80200003 else w >> 1
+
+lfsr32 :: Bit 32 -> Bit 32
+lfsr32 w = forI 0 32 w (\ x i -> lfsr32Step x)
+
+lfsr64Step :: Bit 64 -> Bit 64
+lfsr64Step w = if w[0:0] == 1 then (w >> 1) ^ 0xD800000000000000 else w >> 1
+
+lfsr64 :: Bit 64 -> Bit 64
+lfsr64 w = forI 0 64 w (\ x i -> lfsr64Step x)
+
+nz32 :: Bit 32 -> Bit 32
+nz32 w = if w == 0 then 1 else w
+
+-- ---------------------------------------------------------------------
+-- Ownership (Section 6.2): the default map sends the content of a name,
+-- taken modulo the number of tiles, to a tile.
+
+ownerOf :: Word -> Bit 8
+ownerOf w =
+    let v :: IntV
+        v = if tagOf w == tZERO then 0 else intOf w
+        t :: Bit 10
+        t = fromInteger numTiles
+        step :: Bit 10 -> Integer -> Bit 10
+        step r i =
+            let r1 :: Bit 10
+                r1 = (r << 1) | zeroExtend ((v >> (fromInteger (28 - i)))[0:0])
+            in if r1 >= t then r1 - t else r1
+    in truncate (forI 0 29 0 step)
+
+tileX :: Bit 8 -> Bit 4
+tileX t = forI 0 numTiles 0 (\ a i -> if t == fromInteger i then fromInteger (mod i tilesW) else a)
+
+tileY :: Bit 8 -> Bit 4
+tileY t = forI 0 numTiles 0 (\ a i -> if t == fromInteger i then fromInteger (div i tilesW) else a)
+
+-- ---------------------------------------------------------------------
+-- Environments. Index 0 is the most recently bound variable, so a
+-- de Bruijn index is a direct index.
+
+pushEnv :: Env -> Word -> Env
+pushEnv e w = shiftInAt0 e w
+
+evalOpnd :: Env -> Tmps -> Opnd -> Word
+evalOpnd env tmps o =
+    if o.okind == 0 then select env (o.ow[2:0])
+    else if o.okind == 1 then o.ow
+    else select tmps (o.ow[2:0])
+
+noTmps :: Tmps
+noTmps = replicate 0
+
+-- ---------------------------------------------------------------------
+-- Expressions (Section 6.7). One node per call; an arithmetic expression
+-- is a run of steps, each writing a temporary.
+
+struct XRes =
+    xval  :: Word
+    xsort :: Bool
+  deriving (Bits)
+
+evalX :: XNode -> Env -> Tmps -> XRes
+evalX n env tmps =
+    let supAt :: Integer -> Bit 3
+        supAt i = truncate (n.xsup >> (fromInteger (3 * i)))
+        leaf :: Integer -> Word
+        leaf i = select env (supAt i)
+        used :: Integer -> Bool
+        used i = fromInteger i < n.xk
+        row :: Bit 6
+        row = forI 0 6 0 (\ r i -> if used i then r | (zeroExtend ((leaf i)[0:0]) << (fromInteger i)) else r)
+        bsort :: Bool
+        bsort = forI 0 6 False (\ f i -> f || (used i && tagOf (leaf i) /= tBOOL))
+        bval :: Word
+        bval = mkBool ((n.xtable >> row)[0:0])
+        av :: Word
+        av = evalOpnd env tmps n.xa
+        bv :: Word
+        bv = evalOpnd env tmps n.xb
+        a :: IntV
+        a = intOf av
+        b :: IntV
+        b = intOf bv
+        asort :: Bool
+        asort = tagOf av /= tINT || (n.xop /= 3 && tagOf bv /= tINT)
+        ares :: IntV
+        ares = if n.xop == 0 then a + b
+               else if n.xop == 1 then a - b
+               else if n.xop == 2 then a * b
+               else 0 - a
+    in if n.xkind == 0 then XRes { xval = av; xsort = False }
+       else if n.xkind == 1 then XRes { xval = bval; xsort = bsort }
+       else XRes { xval = mkInt ares; xsort = asort }
+
+-- ---------------------------------------------------------------------
+-- Matcher, mask solver, affine solver and guard (Section 6.8).
+
+struct MatchRes =
+    mok   :: Bool        -- the pair is a redex
+    msort :: Bool        -- a leaf or a guard operand met the wrong sort
+    mmask :: Bit 64      -- solution rows
+    md    :: IntV        -- payload minus the leaf's constant
+  deriving (Bits)
+
+lowOnes29 :: Bit 5 -> IntV
+lowOnes29 n = invert ((invert 0) << n)
+
+matchPair :: RInfo -> Env -> Word -> MatchRes
+matchPair r env pl =
+    let tg :: Bit 3
+        tg = tagOf pl
+        d :: IntV
+        d = intOf pl - r.rc0
+        isB :: Bool
+        isB = r.rpkind == 2
+        isA :: Bool
+        isA = r.rpkind == 3
+        psort :: Bool
+        psort = (isB && tg /= tBOOL) || (isA && tg /= tINT)
+        pok :: Bool
+        pok = if r.rpkind == 0 then True
+              else if r.rpkind == 1 then pl == 0
+              else if isB then True
+              else if r.rk == 0 then d == 0
+              else (d & lowOnes29 r.rt) == 0
+        nrows :: Bit 7
+        nrows = 1 << r.rnmask
+        rowsMask :: Bit 64
+        rowsMask = invert ((invert 0) << nrows)
+        bm :: Bit 64
+        bm = if pl[0:0] == 1 then r.rbtable else invert r.rbtable
+        mask0 :: Bit 64
+        mask0 = if isB then rowsMask & bm else 1
+        -- the environment the guard sees: structural bindings and a
+        -- determined unknown are known before any choice is made
+        vdet :: IntV
+        vdet = d * r.roinv
+        envB :: Env
+        envB = forI 0 6 env (\ e i -> if fromInteger i < r.rnmask then pushEnv e 0 else e)
+        envA :: Env
+        envA = if r.rk == 0 then env
+               else if r.rk == 1 then pushEnv env (mkInt vdet)
+               else pushEnv (pushEnv env 0) 0
+        envPre :: Env
+        envPre = if r.rpkind == 0 then pushEnv env pl
+                 else if r.rpkind == 1 then env
+                 else if isB then envB
+                 else envA
+        atom :: Bit 2 -> Opnd -> Opnd -> (Bit 1, Bool)
+        atom op oa ob =
+            let av = evalOpnd envPre noTmps oa
+                bv = evalOpnd envPre noTmps ob
+                ints = tagOf av == tINT && tagOf bv == tINT
+            in if op == 0 then (if signedLT (intOf av) (intOf bv) then 1 else 0, not ints)
+               else if op == 1 then (if intOf av == intOf bv then 1 else 0, not ints)
+               else (av[0:0], tagOf av /= tBOOL)
+        (bit0, s0) = atom r.rop0 r.ra0 r.rb0
+        (bit1, s1) = atom r.rop1 r.ra1 r.rb1
+        abits :: Bit 7
+        abits = zeroExtend ((if r.rnatoms > 1 then bit1 else 0) ++ (if r.rnatoms > 0 then bit0 else 0))
+        gmask :: Bit 64
+        gmask = (r.rgtable >> (abits << r.rnmask)) & rowsMask
+        hasg :: Bool
+        hasg = r.rhasg == 1
+        gsort :: Bool
+        gsort = hasg && ((r.rnatoms > 0 && s0) || (r.rnatoms > 1 && s1))
+        mask :: Bit 64
+        mask = if hasg then mask0 & gmask else mask0
+    in MatchRes { mok = pok && (not psort) && (not gsort) && mask /= 0;
+                  msort = psort || (pok && gsort);
+                  mmask = mask;
+                  md = d }
+
+-- The values of the unknowns of an affine leaf, given the free values.
+solveLeaf :: RInfo -> IntV -> Bit 64 -> (IntV, IntV)
+solveLeaf r d ent =
+    let lm :: IntV
+        lm = lowOnes29 (29 - r.rt)
+        e0 :: IntV
+        e0 = ent[28:0]
+        f :: IntV
+        f = ent[57:29]
+        cq :: IntV
+        cq = if r.rpivot == 0 then r.rc2 else r.rc1
+        rr :: IntV
+        rr = if r.rk == 2 then d - cq * f else d
+        pv :: IntV
+        pv = (((rr >> r.rt) * r.roinv) & lm) | (e0 & invert lm)
+    in if r.rk == 2 then (if r.rpivot == 0 then (pv, f) else (f, pv))
+       else (pv, 0)
+
+-- The environment of the continuation (Section 6.10, COMMIT step 4).
+commitEnv :: RInfo -> Env -> Word -> Bit 6 -> IntV -> IntV -> Env
+commitEnv r env pl row v0 v1 =
+    let envB :: Env
+        envB = forI 0 6 env (\ e i -> if fromInteger i < r.rnmask
+                                        then pushEnv e (mkBool ((row >> (fromInteger i))[0:0]))
+                                        else e)
+        envA :: Env
+        envA = if r.rk == 0 then env
+               else if r.rk == 1 then pushEnv env (mkInt v0)
+               else pushEnv (pushEnv env (mkInt v0)) (mkInt v1)
+    in if r.rpkind == 0 then pushEnv env pl
+       else if r.rpkind == 1 then env
+       else if r.rpkind == 2 then envB
+       else envA

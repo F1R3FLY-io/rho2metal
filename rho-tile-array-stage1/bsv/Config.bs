@@ -1,0 +1,12 @@
+package Config where
+
+type NT = 4
+
+tilesW :: Integer
+tilesW = 2
+
+tilesH :: Integer
+tilesH = 2
+
+numTiles :: Integer
+numTiles = 4

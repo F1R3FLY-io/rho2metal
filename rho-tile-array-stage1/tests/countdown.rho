@@ -1,0 +1,2 @@
+// The pattern subtracts and the clause tests; the body has no operator.
+for(@(v + 1) <= c where 0 <= *v) c!(*v) | c!(2)

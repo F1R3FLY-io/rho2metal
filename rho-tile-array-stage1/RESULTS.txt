@@ -1,0 +1,149 @@
+Stage 1 tile array: test results (15 November 2026)
+
+bsc 2026.07.1, Icarus Verilog. Every run below passed the step checker,
+including the comparison of the machine's final tables with the checker's.
+
+== 1x1 and 2x2 ==
+ok    compiler rejects clause_free_unknown    (a clause mentions an unknown the pattern does not determine)
+ok    compiler rejects comparison_in_term     (a comparison may occur only in a where clause)
+ok    compiler rejects non_affine_leaf        (an arithmetic leaf that is not affine)
+ok    compiler rejects mixed_languages        (a number or an arithmetic operator inside a Boolean expression)
+ok    compiler rejects quoted_send_payload    (unexpected 'x' in an expression)
+ok    1x1   forwarder               4 seeds  cycles 128-128
+ok    1x1   and_gate                4 seeds  cycles 128-128
+ok    1x1   xor_gate                4 seeds  cycles 128-128
+ok    1x1   half_adder              4 seeds  cycles 128-128
+ok    1x1   full_adder              4 seeds  cycles 128-128
+ok    1x1   adders_composed         4 seeds  cycles 128-128
+ok    1x1   inverse_xor            24 seeds  cycles 128-128
+ok    1x1   inverse_and_false      24 seeds  cycles 128-128
+ok    1x1   unsatisfiable           4 seeds  cycles 128-128
+ok    1x1   comm_race              24 seeds  cycles 128-128
+ok    1x1   persistent              4 seeds  cycles 128-128
+ok    1x1   equal_names             4 seeds  cycles 128-128
+ok    1x1   name_passing            4 seeds  cycles 128-128
+ok    1x1   nil_pattern             4 seeds  cycles 128-128
+ok    1x1   residue                 4 seeds  cycles 128-128
+ok    1x1   int_adder               4 seeds  cycles 128-128
+ok    1x1   int_expression          4 seeds  cycles 128-128
+ok    1x1   int_wraps               4 seeds  cycles 128-128
+ok    1x1   literal_pattern         4 seeds  cycles 128-128
+ok    1x1   comparator_low          4 seeds  cycles 128-128
+ok    1x1   comparator_high         4 seeds  cycles 128-128
+ok    1x1   comparator_signed       4 seeds  cycles 128-128
+ok    1x1   countdown               4 seeds  cycles 128-128
+ok    1x1   counter                 4 seeds  cycles 128-128
+ok    1x1   ping_pong               4 seeds  cycles 128-128
+ok    1x1   clause_on_mask          4 seeds  cycles 128-128
+ok    1x1   clause_boolean_atom     4 seeds  cycles 128-128
+ok    1x1   clause_two_atoms        4 seeds  cycles 128-128
+ok    1x1   inverse_adder          24 seeds  cycles 128-128
+ok    1x1   even_coefficient       24 seeds  cycles 128-128
+ok    1x1   leaf_with_constants     4 seeds  cycles 128-128
+ok    1x1   independent_gates       4 seeds  cycles 128-128
+ok    1x1   parallel_counters       4 seeds  cycles 192-192
+ok    1x1   ill_sorted_boolean               tile 0 raised fault 1 at cycle 11
+ok    1x1   ill_sorted_arithmetic            tile 0 raised fault 1 at cycle 6
+ok    1x1   ill_sorted_leaf                  tile 0 raised fault 1 at cycle 5
+ok    1x1   ill_sorted_clause                tile 0 raised fault 1 at cycle 5
+      1x1: cycles in which more than one tile committed: 0
+ok    2x2   forwarder               4 seeds  cycles 128-128
+ok    2x2   and_gate                4 seeds  cycles 128-128
+ok    2x2   xor_gate                4 seeds  cycles 128-128
+ok    2x2   half_adder              4 seeds  cycles 128-128
+ok    2x2   full_adder              4 seeds  cycles 128-128
+ok    2x2   adders_composed         4 seeds  cycles 128-128
+ok    2x2   inverse_xor            24 seeds  cycles 128-128
+ok    2x2   inverse_and_false      24 seeds  cycles 128-128
+ok    2x2   unsatisfiable           4 seeds  cycles 128-128
+ok    2x2   comm_race              24 seeds  cycles 128-128
+ok    2x2   persistent              4 seeds  cycles 128-128
+ok    2x2   equal_names             4 seeds  cycles 128-128
+ok    2x2   name_passing            4 seeds  cycles 128-128
+ok    2x2   nil_pattern             4 seeds  cycles 128-128
+ok    2x2   residue                 4 seeds  cycles 128-128
+ok    2x2   int_adder               4 seeds  cycles 128-128
+ok    2x2   int_expression          4 seeds  cycles 128-128
+ok    2x2   int_wraps               4 seeds  cycles 128-128
+ok    2x2   literal_pattern         4 seeds  cycles 128-128
+ok    2x2   comparator_low          4 seeds  cycles 128-128
+ok    2x2   comparator_high         4 seeds  cycles 128-128
+ok    2x2   comparator_signed       4 seeds  cycles 128-128
+ok    2x2   countdown               4 seeds  cycles 128-128
+ok    2x2   counter                 4 seeds  cycles 128-128
+ok    2x2   ping_pong               4 seeds  cycles 128-128
+ok    2x2   clause_on_mask          4 seeds  cycles 128-128
+ok    2x2   clause_boolean_atom     4 seeds  cycles 128-128
+ok    2x2   clause_two_atoms        4 seeds  cycles 128-128
+ok    2x2   inverse_adder          24 seeds  cycles 128-128
+ok    2x2   even_coefficient       24 seeds  cycles 128-128
+ok    2x2   leaf_with_constants     4 seeds  cycles 128-128
+ok    2x2   independent_gates       4 seeds  cycles 128-128
+ok    2x2   parallel_counters       4 seeds  cycles 192-192
+ok    2x2   ill_sorted_boolean               tile 1 raised fault 1 at cycle 13
+ok    2x2   ill_sorted_arithmetic            tile 0 raised fault 1 at cycle 6
+ok    2x2   ill_sorted_leaf                  tile 0 raised fault 1 at cycle 5
+ok    2x2   ill_sorted_clause                tile 0 raised fault 1 at cycle 5
+      2x2: cycles in which more than one tile committed: 80
+
+ALL PASS
+
+== 10x10 ==
+ok    10x10 forwarder               1 seeds  cycles 128-128
+ok    10x10 and_gate                1 seeds  cycles 128-128
+ok    10x10 xor_gate                1 seeds  cycles 128-128
+ok    10x10 half_adder              1 seeds  cycles 128-128
+ok    10x10 full_adder              1 seeds  cycles 128-128
+ok    10x10 adders_composed         1 seeds  cycles 128-128
+ok    10x10 inverse_xor             4 seeds  cycles 128-128
+ok    10x10 inverse_and_false       4 seeds  cycles 128-128
+ok    10x10 unsatisfiable           1 seeds  cycles 128-128
+ok    10x10 comm_race               4 seeds  cycles 128-128
+ok    10x10 persistent              1 seeds  cycles 128-128
+ok    10x10 equal_names             1 seeds  cycles 128-128
+ok    10x10 name_passing            1 seeds  cycles 128-128
+ok    10x10 nil_pattern             1 seeds  cycles 128-128
+ok    10x10 residue                 1 seeds  cycles 128-128
+ok    10x10 int_adder               1 seeds  cycles 128-128
+ok    10x10 int_expression          1 seeds  cycles 128-128
+ok    10x10 int_wraps               1 seeds  cycles 128-128
+ok    10x10 literal_pattern         1 seeds  cycles 128-128
+ok    10x10 comparator_low          1 seeds  cycles 128-128
+ok    10x10 comparator_high         1 seeds  cycles 128-128
+ok    10x10 comparator_signed       1 seeds  cycles 128-128
+ok    10x10 countdown               1 seeds  cycles 128-128
+ok    10x10 counter                 1 seeds  cycles 128-128
+ok    10x10 ping_pong               1 seeds  cycles 128-128
+ok    10x10 clause_on_mask          1 seeds  cycles 128-128
+ok    10x10 clause_boolean_atom     1 seeds  cycles 128-128
+ok    10x10 clause_two_atoms        1 seeds  cycles 128-128
+ok    10x10 inverse_adder           4 seeds  cycles 128-128
+ok    10x10 even_coefficient        4 seeds  cycles 128-128
+ok    10x10 leaf_with_constants     1 seeds  cycles 128-128
+ok    10x10 independent_gates       1 seeds  cycles 128-128
+ok    10x10 parallel_counters       1 seeds  cycles 192-192
+ok    10x10 ill_sorted_boolean               tile 1 raised fault 1 at cycle 13
+ok    10x10 ill_sorted_arithmetic            tile 0 raised fault 1 at cycle 6
+ok    10x10 ill_sorted_leaf                  tile 0 raised fault 1 at cycle 5
+ok    10x10 ill_sorted_clause                tile 0 raised fault 1 at cycle 5
+      10x10: cycles in which more than one tile committed: 20
+
+ALL PASS
+
+== Mutation run (2x2) ==
+Run before the final-table comparison was added to the checker; that
+comparison can only kill more. Each line names the first tests that failed.
+
+killed    priority encoder for the row         by inverse_xor, inverse_and_false
+killed    priority encoder for the receive     by comm_race, comparator_high
+killed    clause ignored                       by comparator_low, comparator_high, comparator_signed, countdow
+killed    solver without the inverse           by leaf_with_constants
+killed    free values constant                 by inverse_adder, even_coefficient
+killed    send not consumed                    by comm_race, persistent, countdown, counter
+killed    persistent receive consumed          by persistent, countdown, counter, ping_pong
+killed    everything owned by tile 0           by forwarder, and_gate, xor_gate, half_adder
+killed    unsigned comparison                  by comparator_signed, countdown
+killed    quiescence without the scan          by forwarder, and_gate, xor_gate, half_adder
+killed    mask rows not limited                by inverse_and_false
+killed    sort of a Boolean leaf unchecked     by ill_sorted_leaf (the reference faults on the committed pair)
+12 of 12 mutants killed

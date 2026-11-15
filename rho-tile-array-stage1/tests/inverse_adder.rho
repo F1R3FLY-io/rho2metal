@@ -1,0 +1,2 @@
+// 2^29 solutions in this build; every one reachable.
+for(@(a + b) <- x) { l!(*a) | r!(*b) } | x!(7)

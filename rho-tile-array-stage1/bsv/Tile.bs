@@ -1,0 +1,402 @@
+package Tile where
+
+-- One tile (Section 6.10). The tile is a set of rules that fire in the
+-- same clock cycle whenever their guards hold:
+--
+--   commit   the COMM rule: at most one per cycle
+--   arrive   take a packet from the inbox into the tables
+--   explode  take a continuation apart and send each component to its owner
+--   route    move packets between the four links, the outbox and the inbox
+--   tick     apply the table updates, advance entropy, scan for quiescence
+--
+-- commit, arrive and explode never write the tables directly. They post
+-- requests on wires and tick applies them, which is what lets all of them
+-- fire together.
+
+import Vector
+import FIFOF
+import RegFile
+import Config
+import RhoTypes
+
+interface Link =
+    outValid :: Bool
+    outFirst :: Packet
+    outDeq   :: Action
+    inReady  :: Bool
+    inPut    :: Packet -> Action
+
+interface Tile =
+    links :: Vector 4 Link          -- 0 north, 1 east, 2 south, 3 west
+    ctl   :: Bool -> Bit 32 -> Bool -> Action   -- halt, seed, dump; called every cycle
+    fault :: Bit 5
+    idle  :: Bool
+
+fSORT :: Bit 5
+fSORT = 1
+fHEAP :: Bit 5
+fHEAP = 2
+fSTORE :: Bit 5
+fSTORE = 4
+fSTACK :: Bit 5
+fSTACK = 8
+fDATA :: Bit 5
+fDATA = 16
+
+emptyEnv :: Env
+emptyEnv = replicate 0
+
+{-# verilog mkTile #-}
+mkTile :: Bit 8 -> Module Tile
+mkTile tid =
+  module
+    let myX :: Bit 4
+        myX = tileX tid
+        myY :: Bit 4
+        myY = tileY tid
+
+    started :: Reg Bool <- mkReg False
+    cyc     :: Reg (Bit 32) <- mkReg 0
+    faultR  :: Reg (Bit 5) <- mkReg 0
+    haltW   :: Wire Bool <- mkDWire True
+    seedW   :: Wire (Bit 32) <- mkDWire 0
+    dumpW   :: Wire Bool <- mkDWire False
+
+    -- entropy: send, receive, row, free values
+    l1 :: Reg (Bit 32) <- mkReg 1
+    l2 :: Reg (Bit 32) <- mkReg 1
+    l3 :: Reg (Bit 32) <- mkReg 1
+    l4 :: Reg (Bit 64) <- mkReg 1
+
+    -- tables
+    sV :: Vector 8 (Reg Bool) <- replicateM (mkReg False)
+    sE :: Vector 8 (Reg SEntry) <- replicateM mkRegU
+    rV :: Vector 8 (Reg Bool) <- replicateM (mkReg False)
+    rE :: Vector 8 (Reg REntry) <- replicateM mkRegU
+
+    -- the static segment, the same in every tile
+    romC :: RegFile (Bit 8) CNode <- mkRegFileFullLoad "romc.hex"
+    romX :: RegFile (Bit 8) XNode <- mkRegFileFullLoad "romx.hex"
+    romR :: RegFile (Bit 6) RInfo <- mkRegFileFullLoad "romr.hex"
+
+    -- queues
+    inQ    :: Vector 4 (FIFOF Packet) <- replicateM mkUGFIFOF
+    outQ   :: Vector 4 (FIFOF Packet) <- replicateM mkUGFIFOF
+    inbox  :: FIFOF Packet <- mkUGFIFOF
+    outbox :: FIFOF Packet <- mkUGFIFOF
+    jobQ   :: FIFOF Job <- mkUGFIFOF
+    rrP    :: Reg (Bit 3) <- mkReg 0
+
+    -- exploder
+    stk      :: Vector 8 (Reg Job) <- replicateM mkRegU
+    sp       :: Reg (Bit 4) <- mkReg 0
+    evBusy   :: Reg Bool <- mkReg False
+    evPc     :: Reg (Bit 8) <- mkReg 0
+    evIdx    :: Reg (Bit 3) <- mkReg 0
+    tmps     :: Vector 8 (Reg Word) <- replicateM (mkReg 0)
+    pendRes  :: Reg Bool <- mkReg False      -- the value is a residue, not a payload
+    pendChan :: Reg Word <- mkReg 0
+    pendEnv  :: Reg Env <- mkRegU
+
+    -- quiescence scan
+    scS     :: Reg (Bit 3) <- mkReg 0
+    scR     :: Reg (Bit 3) <- mkReg 0
+    scFound :: Reg Bool <- mkReg False
+    scDirty :: Reg Bool <- mkReg False
+    clean   :: Reg Bool <- mkReg False
+
+    -- requests to tick
+    insS :: RWire (Bit 3, SEntry) <- mkRWire
+    insR :: RWire (Bit 3, REntry) <- mkRWire
+    rmS  :: RWire (Bit 3) <- mkRWire
+    rmR  :: RWire (Bit 3) <- mkRWire
+    fltC :: Wire (Bit 5) <- mkDWire 0
+    fltA :: Wire (Bit 5) <- mkDWire 0
+    fltX :: Wire (Bit 5) <- mkDWire 0
+
+    let run :: Bool
+        run = started && (not haltW) && faultR == 0
+
+        sValid :: Bit 8
+        sValid = forI 0 8 0 (\ m i -> if (select sV i)._read then m | (1 << (fromInteger i)) else m)
+        rValid :: Bit 8
+        rValid = forI 0 8 0 (\ m i -> if (select rV i)._read then m | (1 << (fromInteger i)) else m)
+
+        mkPacket :: Bit 1 -> Word -> Word -> Bit 6 -> Env -> Packet
+        mkPacket k ch pay ri env =
+            let o = ownerOf ch
+            in Packet { pdx = tileX o; pdy = tileY o; pkind = k; pchan = ch;
+                        ppay = pay; prinfo = ri; penv = env }
+
+    rules
+      -- ---------------------------------------------------------------
+      "commit": when run && jobQ.notFull
+       ==> action
+              let nS = popCount (zeroExtend sValid)
+                  si :: Bit 3
+                  si = truncate (nthSet (zeroExtend sValid) (choose l1 nS))
+                  snd = (select sE si)._read
+                  rMatch :: Bit 8
+                  rMatch = forI 0 8 0 (\ m i -> if (select rV i)._read && ((select rE i)._read).rchan == snd.schan
+                                                  then m | (1 << (fromInteger i)) else m)
+                  nR = popCount (zeroExtend rMatch)
+                  ri :: Bit 3
+                  ri = truncate (nthSet (zeroExtend rMatch) (choose l2 nR))
+                  rcv = (select rE ri)._read
+                  info = romR.sub rcv.rinfo
+                  res = matchPair info rcv.renv snd.spay
+                  cnt = popCount res.mmask
+                  row = nthSet res.mmask (choose l3 cnt)
+                  (v0, v1) = solveLeaf info res.md l4
+                  env1 = commitEnv info rcv.renv snd.spay row v0 v1
+                  pair = nS /= 0 && nR /= 0
+              if pair && res.msort
+                then fltC := fSORT
+                else if pair && res.mok
+                  then action
+                         jobQ.enq (Job { jaddr = info.rbody; jenv = env1 })
+                         rmS.wset si
+                         if info.rpersist == 0 then rmR.wset ri else noAction
+                         $display "C %0d %0d %0d %0d %0d %h %h" cyc tid si ri row v0 v1
+                  else noAction
+
+      -- ---------------------------------------------------------------
+      "arrive": when run && inbox.notEmpty
+       ==> action
+              let p = inbox.first
+                  sFree = firstFree sValid
+                  rFree = firstFree rValid
+              inbox.deq
+              if p.pkind == 0
+                then if sValid == 0xFF
+                       then fltA := fSTORE
+                       else action
+                              insS.wset (sFree, SEntry { schan = p.pchan; spay = p.ppay })
+                              $display "S %0d %0d %0d %h %h" cyc tid sFree p.pchan p.ppay
+                else if rValid == 0xFF
+                       then fltA := fSTORE
+                       else action
+                              insR.wset (rFree, REntry { rchan = p.pchan; rinfo = p.prinfo; renv = p.penv })
+                              $display "R %0d %0d %0d %h %0d %h %h %h %h %h %h" cyc tid rFree p.pchan p.prinfo (select p.penv 0) (select p.penv 1) (select p.penv 2) (select p.penv 3) (select p.penv 4) (select p.penv 5)
+
+      -- ---------------------------------------------------------------
+      "boot": when (not started) && tid == 0
+       ==> action
+              (select stk 0) := Job { jaddr = 0; jenv = emptyEnv }
+              sp := 1
+
+      "explode": when run && outbox.notFull && (evBusy || sp /= 0 || jobQ.notEmpty)
+       ==> action
+              let tv :: Tmps
+                  tv = map readReg tmps
+                  fromStk = sp /= 0
+                  base :: Bit 4
+                  base = if fromStk then sp - 1 else 0
+                  job = if fromStk then (select stk (base[2:0]))._read else jobQ.first
+                  node = romC.sub job.jaddr
+                  ch = evalOpnd job.jenv noTmps node.cchan
+                  -- the expression under evaluation: a step in progress, or
+                  -- the first node of the expression of this component
+                  xaddr = if evBusy then evPc else node.cx
+                  xn = romX.sub xaddr
+                  xenv = if evBusy then pendEnv else job.jenv
+                  xr = evalX xn xenv tv
+                  isRes = if evBusy then pendRes else node.ckind == 4
+                  xch = if evBusy then pendChan else ch
+                  idx :: Bit 3
+                  idx = if evBusy then evIdx else 0
+                  deliver :: Action
+                  deliver = if isRes
+                              then $display "V %0d %0d %h" cyc tid xr.xval
+                              else outbox.enq (mkPacket 0 xch xr.xval 0 emptyEnv)
+                  -- one step of an expression; done when the node is not an
+                  -- arithmetic step or is the last one
+                  stepX :: Action
+                  stepX = if xr.xsort
+                            then fltX := fSORT
+                            else if xn.xkind /= 2 || xn.xlast == 1
+                              then action { deliver; evBusy := False }
+                              else action
+                                     (select tmps idx) := xr.xval
+                                     evPc := xaddr + 1
+                                     evIdx := idx + 1
+                                     evBusy := True
+                                     pendRes := isRes
+                                     pendChan := xch
+                                     pendEnv := xenv
+              if evBusy
+                then stepX
+                else action
+                       if not fromStk then jobQ.deq else noAction
+                       if node.ckind == 1
+                         then if base > 6
+                                then fltX := fSTACK
+                                else action
+                                       (select stk (base[2:0])) := Job { jaddr = node.cy; jenv = job.jenv }
+                                       (select stk ((base + 1)[2:0])) := Job { jaddr = node.cx; jenv = job.jenv }
+                                       sp := base + 2
+                         else action
+                                sp := base
+                                if node.ckind == 2 || node.ckind == 4
+                                  then stepX
+                                  else if node.ckind == 3
+                                    then outbox.enq (mkPacket 1 ch 0 (truncate node.cx) job.jenv)
+                                    else noAction
+
+      -- ---------------------------------------------------------------
+      -- Dimension-ordered routing. Inputs 0 to 3 are the links and input 4
+      -- is the outbox; outputs 0 to 3 are the links and output 4 is the
+      -- inbox. Each output grants one input, in rotating order.
+      "route": when run
+       ==> action
+              let inValid :: Integer -> Bool
+                  inValid i = if i == 4 then outbox.notEmpty else (select inQ i).notEmpty
+                  inPkt :: Integer -> Packet
+                  inPkt i = if i == 4 then outbox.first else (select inQ i).first
+                  target :: Packet -> Bit 3
+                  target p = if p.pdx > myX then 1
+                             else if p.pdx < myX then 3
+                             else if p.pdy > myY then 2
+                             else if p.pdy < myY then 0
+                             else 4
+                  outReady :: Integer -> Bool
+                  outReady o = if o == 4 then inbox.notFull else (select outQ o).notFull
+                  wants :: Integer -> Integer -> Bool
+                  wants i o = inValid i && target (inPkt i) == fromInteger o
+                  -- position of input i in the rotating order
+                  rank :: Integer -> Bit 3
+                  rank i = let d :: Bit 3
+                               d = fromInteger i
+                           in if d >= rrP then d - rrP else d + 5 - rrP
+                  better :: Integer -> Integer -> Integer -> Bool
+                  better o i j = wants j o && rank j < rank i
+                  granted :: Integer -> Integer -> Bool
+                  granted i o = wants i o && outReady o &&
+                                (not (forI 0 5 False (\ b j -> b || (j /= i && better o i j))))
+                  doOut :: Integer -> Integer -> Action
+                  doOut o i = if granted i o
+                                then (if o == 4 then inbox.enq (inPkt i) else (select outQ o).enq (inPkt i))
+                                else noAction
+                  doIn :: Integer -> Action
+                  doIn i = if forI 0 5 False (\ b o -> b || granted i o)
+                             then (if i == 4 then outbox.deq else (select inQ i).deq)
+                             else noAction
+                  outs :: Vector 25 Action
+                  outs = genWith (\ n -> doOut (div n 5) (mod n 5))
+                  ins :: Vector 5 Action
+                  ins = genWith doIn
+              joinActions outs
+              joinActions ins
+              rrP := if rrP == 4 then 0 else rrP + 1
+
+      -- ---------------------------------------------------------------
+      -- At the end of a run, report what the tables hold, so that the
+      -- checker's reconstruction can be compared with the machine.
+      "dump": when dumpW
+       ==> action
+              let slotNo :: Integer -> Bit 4
+                  slotNo i = fromInteger i
+                  dS :: Integer -> Action
+                  dS i = let e = (select sE i)._read
+                         in if (select sV i)._read
+                              then $display "ES %0d %0d %h %h" tid (slotNo i) e.schan e.spay
+                              else noAction
+                  dR :: Integer -> Action
+                  dR i = let e = (select rE i)._read
+                         in if (select rV i)._read
+                              then $display "ER %0d %0d %h %0d %h %h %h %h %h %h" tid (slotNo i) e.rchan e.rinfo (select e.renv 0) (select e.renv 1) (select e.renv 2) (select e.renv 3) (select e.renv 4) (select e.renv 5)
+                              else noAction
+                  ds :: Vector 8 Action
+                  ds = genWith dS
+                  dr :: Vector 8 Action
+                  dr = genWith dR
+              joinActions ds
+              joinActions dr
+
+      -- ---------------------------------------------------------------
+      "tick": when True
+       ==> action
+              let insSv = isValid insS.wget
+                  (insSl, insSe) = validValue insS.wget
+                  insRv = isValid insR.wget
+                  (insRl, insRe) = validValue insR.wget
+                  rmSv = isValid rmS.wget
+                  rmSl = validValue rmS.wget
+                  rmRv = isValid rmR.wget
+                  rmRl = validValue rmR.wget
+                  updS :: Integer -> Action
+                  updS i = if insSv && insSl == fromInteger i
+                             then action { (select sV i) := True; (select sE i) := insSe }
+                             else if rmSv && rmSl == fromInteger i
+                               then (select sV i) := False
+                               else noAction
+                  updR :: Integer -> Action
+                  updR i = if insRv && insRl == fromInteger i
+                             then action { (select rV i) := True; (select rE i) := insRe }
+                             else if rmRv && rmRl == fromInteger i
+                               then (select rV i) := False
+                               else noAction
+                  us :: Vector 8 Action
+                  us = genWith updS
+                  ur :: Vector 8 Action
+                  ur = genWith updR
+                  -- quiescence scan: one pair of slots per cycle
+                  se = (select sE scS)._read
+                  re = (select rE scR)._read
+                  pairV = (select sV scS)._read && (select rV scR)._read && se.schan == re.rchan
+                  mr = matchPair (romR.sub re.rinfo) re.renv se.spay
+                  hit = pairV && (mr.mok || mr.msort)
+                  anyIns = insSv || insRv
+                  lastPair = scS == 7 && scR == 7
+                  newFault = fltC | fltA | fltX
+              joinActions us
+              joinActions ur
+              if started
+                then action
+                       cyc := cyc + 1
+                       l1 := lfsr32 l1
+                       l2 := lfsr32 l2
+                       l3 := lfsr32 l3
+                       l4 := lfsr64 l4
+                else action
+                       started := True
+                       let s = seedW ^ ((zeroExtend tid + 1) * 0x9E3779B1)
+                       l1 := nz32 s
+                       l2 := nz32 (s ^ 0x5bd1e995)
+                       l3 := nz32 (s ^ 0x27d4eb2f)
+                       l4 := (nz32 (s ^ 0x165667b1)) ++ (nz32 (s ^ 0x85ebca6b))
+              if newFault /= 0 && faultR == 0
+                then action
+                       faultR := newFault
+                       $display "F %0d %0d %0d" cyc tid newFault
+                else noAction
+              scR := scR + 1
+              if scR == 7 then scS := scS + 1 else noAction
+              if lastPair
+                then action
+                       clean := (not (scFound || hit)) && (not scDirty) && (not anyIns)
+                       scFound := False
+                       scDirty := False
+                else action
+                       scFound := scFound || hit
+                       scDirty := scDirty || anyIns
+                       if anyIns then clean := False else noAction
+
+    let mkLink :: Integer -> Link
+        mkLink d =
+          interface Link
+            outValid = (select outQ d).notEmpty
+            outFirst = (select outQ d).first
+            outDeq   = (select outQ d).deq
+            inReady  = (select inQ d).notFull
+            inPut p  = (select inQ d).enq p
+
+        qEmpty :: Bool
+        qEmpty = forI 0 4 True (\ b i -> b && (not (select inQ i).notEmpty) && (not (select outQ i).notEmpty))
+
+    interface
+      links = genWith mkLink
+      ctl h s d = action { haltW := h; seedW := s; dumpW := d }
+      fault = faultR
+      idle = started && clean && qEmpty && (not inbox.notEmpty) && (not outbox.notEmpty)
+             && (not jobQ.notEmpty) && sp == 0 && (not evBusy)

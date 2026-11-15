@@ -1,0 +1,2 @@
+// An AND gate: Appendix A of the design specification.
+for(a <- x) for(b <- y) z!(*a && *b) | x!(true) | y!(false)
